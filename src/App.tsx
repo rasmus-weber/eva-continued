@@ -10,6 +10,7 @@ import {
     Navigation2,
     Table3,
 } from '@economic/taco';
+import { EvaLogo, EvaLogoDefs } from './components/EvaLogo';
 
 type AISuggestion = {
     value: string;
@@ -127,13 +128,24 @@ type Conversation = {
 let nextMsgId = 1000;
 let nextConvId = 100;
 
+// Status line shown next to the morphing mark while Eva "thinks" — cycles so it
+// reads like Eva is narrating what it's doing (ported from the eva-work prototype).
+const THINK_PHRASES = ['Tænker…', 'Kigger i kassekladden…', 'Samler data…', 'Skriver svar…'];
+
 const greetingMessage: Message = {
     id: 1,
     from: 'eva',
     parts: [
         {
             kind: 'text',
-            text: 'Hej! Jeg er Eva, din e-conomic-assistent. Jeg kan svare på spørgsmål om dine bøger, finde poster og hjælpe dig med at forstå hvad der foregår på den side du arbejder på. Prøv et af forslagene nedenfor — eller skriv selv.',
+            text:
+                'Hej, jeg hedder EVA\n\n' +
+                "Jeg er e-conomic's nye AI-assistent. Jeg er i øjeblikket i alpha, hvilket " +
+                'betyder at jeg testes med et begrænset antal brugere - din oplevelse og dine ' +
+                'spørgsmål er med til at forme, hvad jeg bliver. Lad venligst være med at dele ' +
+                'personlige oplysninger med mig, da vi gerne vil gemme dine spørgsmål til ' +
+                'træningsformål. Jeg kan hjælpe med spørgsmål inden for din aftale i e-conomic ' +
+                'og slå regler og frister op for dig på skat.dk. Prøv et af forslagene nedenfor — eller skriv selv.',
         },
     ],
 };
@@ -221,11 +233,36 @@ export default function App() {
     const [contextField, setContextField] = useState<SuggestableField | null>(null);
     const [highlightedRowId, setHighlightedRowId] = useState<number | null>(null);
     const conversationEndRef = useRef<HTMLDivElement>(null);
+    const evaInputRef = useRef<HTMLTextAreaElement>(null);
 
     const [conversations, setConversations] = useState<Conversation[]>(seedConversations);
     const [activeConversationId, setActiveConversationId] = useState<number | null>(1);
     const [openMenuConvId, setOpenMenuConvId] = useState<number | null>(null);
     const [renamingConvId, setRenamingConvId] = useState<number | null>(null);
+
+    // Eva "thinking" state — while true, the morphing mark + a cycling status line
+    // are shown in the conversation until the reply lands.
+    const [thinking, setThinking] = useState(false);
+    const [thinkDelay, setThinkDelay] = useState(0); // random negative offset → different start shape each send
+    const [thinkPhrase, setThinkPhrase] = useState(0);
+
+    // While thinking, advance the status line every 700ms (stops at the last phrase).
+    useEffect(() => {
+        if (!thinking) return;
+        setTimeout(() => conversationEndRef.current?.scrollIntoView({ behavior: 'smooth' }), 60);
+        const id = setInterval(() => {
+            setThinkPhrase((p) => Math.min(p + 1, THINK_PHRASES.length - 1));
+        }, 700);
+        return () => clearInterval(id);
+    }, [thinking]);
+
+    // Auto-grow the input field to fit the message (up to a max height, then scroll).
+    useEffect(() => {
+        const el = evaInputRef.current;
+        if (!el) return;
+        el.style.height = 'auto';
+        el.style.height = Math.min(el.scrollHeight, 160) + 'px';
+    }, [evaInput, evaOpen, activeConversationId]);
 
     function commitRename(id: number, newTitle: string) {
         const trimmed = newTitle.trim();
@@ -288,6 +325,19 @@ export default function App() {
         };
         setConversations((prev) => [newConv, ...prev]);
         setActiveConversationId(newConv.id);
+    }
+
+    // Eva answers with a short "thinking" beat: the user's message lands now, Eva
+    // shows the morphing mark + cycling status line, then the reply(-ies) arrive.
+    function respond(userMsg: Omit<Message, 'id'> | null, ...evaMsgs: Omit<Message, 'id'>[]) {
+        if (userMsg) pushMessages(userMsg);
+        setThinkDelay(-(Math.random() * 5));
+        setThinkPhrase(0);
+        setThinking(true);
+        setTimeout(() => {
+            pushMessages(...evaMsgs);
+            setThinking(false);
+        }, 2000);
     }
 
     function clearSuggestion(rowId: number, field: SuggestableField) {
@@ -372,7 +422,7 @@ export default function App() {
     function askTravel() {
         const travel = postings.filter((p) => p.konto.startsWith('6210'));
         const total = travel.reduce((s, p) => s + p.debit, 0);
-        pushMessages(
+        respond(
             { from: 'user', parts: [{ kind: 'text', text: 'Hvor meget har vi brugt på rejser i januar?' }] },
             {
                 from: 'eva',
@@ -407,7 +457,7 @@ export default function App() {
     function askMissingApprovals() {
         // Pretend bilag 6, 7, 12 mangler godkendelse
         const flagged = postings.filter((p) => [6, 7, 12].includes(p.bilag));
-        pushMessages(
+        respond(
             { from: 'user', parts: [{ kind: 'text', text: 'Hvilke posteringer mangler godkendelse?' }] },
             {
                 from: 'eva',
@@ -441,7 +491,7 @@ export default function App() {
         }
         const ranked = [...byKonto.entries()].sort((a, b) => b[1] - a[1]).slice(0, 5);
         const max = ranked[0]?.[1] ?? 1;
-        pushMessages(
+        respond(
             { from: 'user', parts: [{ kind: 'text', text: 'Top 5 udgiftskonti denne måned' }] },
             {
                 from: 'eva',
@@ -479,7 +529,7 @@ export default function App() {
         else if (isTravel) analysis += 'Rejseudgifter trækkes typisk på konto 6210 — dét stemmer. Husk at bilaget skal vedhæftes for momsfradrag.';
         else analysis += 'Konto- og moms-valget ser korrekt ud i forhold til typen af udgift.';
 
-        pushMessages(
+        respond(
             {
                 from: 'user',
                 parts: [{ kind: 'text', text: `Er bilag ${row.bilag} (${row.tekst}) korrekt bogført?` }],
@@ -522,7 +572,7 @@ export default function App() {
                   : 'lav sikkerhed'
             : '';
 
-        pushMessages(
+        respond(
             {
                 from: 'user',
                 parts: [{ kind: 'text', text: `Mere om dit forslag på **${fieldLabel}** for Bilag ${row.bilag}?` }],
@@ -554,9 +604,9 @@ export default function App() {
 
     function sendTyped() {
         const text = evaInput.trim();
-        if (!text) return;
+        if (!text || thinking) return;
         setEvaInput('');
-        pushMessages(
+        respond(
             { from: 'user', parts: [{ kind: 'text', text }] },
             {
                 from: 'eva',
@@ -572,6 +622,7 @@ export default function App() {
 
     return (
         <>
+            <EvaLogoDefs />
             <Layout>
                 <Layout.Top>
                     {({ toggleSidebar }) => (
@@ -602,9 +653,9 @@ export default function App() {
                                 <button
                                     onClick={() => setEvaOpen(true)}
                                     aria-label="Åbn Eva — AI-assistent"
-                                    className="group inline-flex items-center justify-center h-9 w-9 hover:w-[140px] overflow-hidden rounded-full text-white bg-gradient-to-r from-purple-500 to-pink-500 hover:brightness-110 active:scale-95 transition-[width] duration-300"
+                                    className="group inline-flex items-center justify-center h-9 w-9 hover:w-[140px] overflow-hidden rounded-full text-white hover:bg-white/10 active:scale-95 transition-[width] duration-300"
                                 >
-                                    <Icon name="ai-stars" className="shrink-0" />
+                                    <EvaLogo mode="idle" size={24} className="shrink-0" />
                                     <span className="text-sm font-medium whitespace-nowrap overflow-hidden max-w-0 group-hover:max-w-[120px] group-hover:ml-2 transition-all duration-300">
                                         Spørg Eva
                                     </span>
@@ -847,36 +898,61 @@ export default function App() {
                         setContextRow(null);
                         setContextField(null);
                         setHighlightedRowId(null);
+                        setThinking(false);
                     }
                 }}
                 size="md"
                 variant="embedded"
-                showCloseButton
+                showCloseButton={false}
             >
                 <Drawer.Content aria-label="Eva AI-assistent">
-                    <Drawer.Title className="!text-base !py-2.5 !items-center !bg-transparent !border-b-0">
+                    <div className="absolute right-3 top-3 z-20 flex items-center gap-1">
+                        <IconButton
+                            icon="thumb-both"
+                            appearance="discrete"
+                            tooltip="Giv feedback"
+                            aria-label="Giv feedback"
+                            onClick={() => {}}
+                        />
+                        <IconButton
+                            icon="close"
+                            appearance="discrete"
+                            tooltip="Luk"
+                            aria-label="Luk"
+                            onClick={() => {
+                                setEvaOpen(false);
+                                setContextRow(null);
+                                setContextField(null);
+                                setHighlightedRowId(null);
+                                setThinking(false);
+                            }}
+                        />
+                    </div>
+                    <Drawer.Title className="!text-base !py-4 !px-5 !pr-24 !items-center !bg-transparent">
                         <span className="flex h-full items-center gap-2 leading-none min-w-0">
-                            <span className="text-purple-700 inline-flex items-center shrink-0"><Icon name="ai-stars" /></span>
+                            <EvaLogo size={20} className="shrink-0" />
                             {activeConversation ? (
                                 <>
                                     <button
                                         onClick={() => setActiveConversationId(null)}
-                                        className="font-bold text-purple-700 hover:underline shrink-0"
+                                        className="font-semibold text-grey-darkest hover:underline shrink-0"
+                                        title="Tilbage til samtaler"
                                     >
-                                        Eva
+                                        EVA
                                     </button>
+                                    <span className="text-[13px] leading-5 px-1.5 rounded-full shrink-0" style={{ backgroundColor: '#E2DCFF', color: '#473279' }}>Alpha</span>
                                     <span className="text-grey-dark shrink-0">/</span>
                                     {renamingConvId === activeConversation.id ? (
                                         <RenameInput
                                             initialValue={activeConversation.title}
                                             onCommit={(v) => commitRename(activeConversation.id, v)}
                                             onCancel={cancelRename}
-                                            className="font-medium text-grey-darkest text-base bg-white border border-purple-300 rounded px-1 py-0 outline-none focus:ring-2 focus:ring-purple-300 min-w-0 flex-1"
+                                            className="font-medium text-grey-darkest text-base bg-white border border-grey-300 rounded px-1 py-0 outline-none focus:ring-2 focus:ring-blue-300 min-w-0 flex-1"
                                         />
                                     ) : (
                                         <span
                                             onDoubleClick={() => setRenamingConvId(activeConversation.id)}
-                                            className="font-medium text-grey-darkest truncate select-none cursor-text"
+                                            className="font-normal text-grey-dark truncate select-none cursor-text"
                                             title="Dobbeltklik for at omdøbe"
                                         >
                                             {activeConversation.title}
@@ -884,13 +960,14 @@ export default function App() {
                                     )}
                                 </>
                             ) : (
-                                <span className="font-bold text-purple-700">Eva</span>
+                                <>
+                                    <span className="font-semibold text-grey-darkest">EVA</span>
+                                    <span className="text-[13px] leading-5 px-1.5 rounded-full shrink-0" style={{ backgroundColor: '#E2DCFF', color: '#473279' }}>Alpha</span>
+                                </>
                             )}
                         </span>
                     </Drawer.Title>
                     <div className="flex flex-col h-full min-h-0">
-                        {/* Eva gradient strip — divider between the title and the conversation */}
-                        <div className="h-0.5 bg-gradient-to-r from-purple-500 to-pink-500 shrink-0" />
                         {!activeConversation ? (
                             <>
                                 <div className="flex-1 min-h-0 overflow-y-auto">
@@ -907,7 +984,7 @@ export default function App() {
                                                         setActiveConversationId(c.id);
                                                     }
                                                 }}
-                                                className="group relative rounded p-2 hover:bg-purple-100/60 transition-colors cursor-pointer"
+                                                className="group relative rounded p-2 hover:bg-grey-100 transition-colors cursor-pointer"
                                             >
                                                 <div className="flex items-center justify-between gap-2">
                                                     {renamingConvId === c.id ? (
@@ -920,7 +997,7 @@ export default function App() {
                                                                 initialValue={c.title}
                                                                 onCommit={(v) => commitRename(c.id, v)}
                                                                 onCancel={cancelRename}
-                                                                className="font-bold text-sm text-grey-darkest bg-white border border-purple-300 rounded px-1 py-0 w-full outline-none focus:ring-2 focus:ring-purple-300"
+                                                                className="font-bold text-sm text-grey-darkest bg-white border border-grey-300 rounded px-1 py-0 w-full outline-none focus:ring-2 focus:ring-blue-300"
                                                             />
                                                         </div>
                                                     ) : (
@@ -931,7 +1008,7 @@ export default function App() {
                                                 <div className="text-xs text-grey-dark truncate mt-0.5">{previewMessage(c.messages)}</div>
                                                 <div
                                                     className={
-                                                        'absolute inset-y-0 right-0 flex items-center pl-10 pr-1.5 rounded-r bg-gradient-to-l from-purple-100/60 from-50% to-transparent transition-opacity ' +
+                                                        'absolute inset-y-0 right-0 flex items-center pl-10 pr-1.5 rounded-r bg-gradient-to-l from-grey-100 from-50% to-transparent transition-opacity ' +
                                                         (openMenuConvId === c.id ? 'opacity-100' : 'opacity-0 pointer-events-none group-hover:opacity-100 group-hover:pointer-events-auto')
                                                     }
                                                     onClick={(e) => e.stopPropagation()}
@@ -978,50 +1055,63 @@ export default function App() {
                             {messages.map((m) => (
                                 <ChatMessage key={m.id} message={m} />
                             ))}
+                            {thinking && (
+                                <div
+                                    className="eva-msg-thinking"
+                                    aria-label="Eva tænker"
+                                    role="status"
+                                    style={{ '--eva-think-delay': `${thinkDelay.toFixed(2)}s` } as React.CSSProperties}
+                                >
+                                    <EvaLogo size={28} />
+                                    <span className="eva-msg-thinking-text">{THINK_PHRASES[thinkPhrase]}</span>
+                                </div>
+                            )}
                             <div ref={conversationEndRef} />
                         </div>
                         <Drawer.Footer>
                             <div className="flex flex-col gap-2 w-full">
-                                {contextRow && (
-                                    <div
-                                        className="rounded border px-3 py-2 text-xs flex items-center gap-2"
-                                        style={{
-                                            backgroundColor: '#F5F0FF',
-                                            borderColor: '#C4B5FD',
-                                            color: '#7C3AED',
-                                        }}
-                                    >
-                                        <Icon name="ai-stars" />
-                                        <span>
-                                            Kontekst:{' '}
-                                            {contextField && (
-                                                <>
-                                                    <strong>
-                                                        {contextField === 'konto' ? 'Konto' : contextField === 'modkonto' ? 'Modkonto' : 'Moms'}
-                                                    </strong>
-                                                    {' i '}
-                                                </>
-                                            )}
-                                            <strong>Bilag {contextRow.bilag}</strong> — {contextRow.tekst}
-                                        </span>
-                                        <button
-                                            type="button"
-                                            aria-label="Ryd kontekst"
-                                            className="ml-auto inline-flex items-center justify-center w-5 h-5 rounded text-purple-700 hover:bg-purple-200 shrink-0"
-                                            onClick={() => {
-                                                setContextRow(null);
-                                                setContextField(null);
-                                                setHighlightedRowId(null);
-                                            }}
-                                        >
-                                            <Icon name="close" />
-                                        </button>
-                                    </div>
-                                )}
-                                <div className="flex items-center gap-2 w-full">
-                                    <input
-                                        className="flex-1 rounded border border-grey-300 px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-purple-500"
-                                        placeholder="Spørg Eva om dine bøger…"
+                                {/* All-in-one input field (mirrors the "Eva — always available" EvaInputCard):
+                                    context chip → textarea → bottom row with scrollable chips + inline send. */}
+                                <div className="rounded border border-grey-300 bg-white shadow-sm focus-within:border-grey-400">
+                                    {contextRow && (
+                                        <div className="px-3 pt-3 flex">
+                                            <span
+                                                className="max-w-full inline-flex items-center gap-1.5 rounded border px-3 py-1 text-xs"
+                                                style={{ backgroundColor: '#F3F4F6', borderColor: '#E1E1E1', color: '#424242' }}
+                                            >
+                                                <EvaLogo size={14} />
+                                                <span className="truncate">
+                                                    Kontekst:{' '}
+                                                    {contextField && (
+                                                        <>
+                                                            <strong>
+                                                                {contextField === 'konto' ? 'Konto' : contextField === 'modkonto' ? 'Modkonto' : 'Moms'}
+                                                            </strong>
+                                                            {' i '}
+                                                        </>
+                                                    )}
+                                                    <strong>Bilag {contextRow.bilag}</strong> — {contextRow.tekst}
+                                                </span>
+                                                <button
+                                                    type="button"
+                                                    aria-label="Ryd kontekst"
+                                                    className="inline-flex items-center justify-center w-4 h-4 rounded text-grey-dark hover:bg-grey-200 shrink-0"
+                                                    onClick={() => {
+                                                        setContextRow(null);
+                                                        setContextField(null);
+                                                        setHighlightedRowId(null);
+                                                    }}
+                                                >
+                                                    <Icon name="close" className="!h-3 !w-3" />
+                                                </button>
+                                            </span>
+                                        </div>
+                                    )}
+                                    <textarea
+                                        ref={evaInputRef}
+                                        rows={1}
+                                        className="w-full resize-none bg-transparent px-4 pt-3 pb-2 text-sm text-grey-darkest leading-5 max-h-40 overflow-y-auto focus:outline-none"
+                                        placeholder="Skriv din besked…"
                                         value={evaInput}
                                         onChange={(e) => setEvaInput(e.target.value)}
                                         onKeyDown={(e) => {
@@ -1031,17 +1121,26 @@ export default function App() {
                                             }
                                         }}
                                     />
-                                    <Button appearance="primary" onClick={sendTyped} disabled={!evaInput.trim()}>
-                                        Send
-                                    </Button>
+                                    <div className="flex items-end gap-2 px-3 pb-3 pt-1">
+                                        <div className="grow min-w-0">
+                                            <SuggestionChipBar
+                                                chips={[
+                                                    { label: 'Rejseudgifter januar', onClick: askTravel },
+                                                    { label: 'Manglende godkendelser', onClick: askMissingApprovals },
+                                                    { label: 'Top 5 udgiftskonti', onClick: askTopExpenses },
+                                                ]}
+                                            />
+                                        </div>
+                                        <IconButton
+                                            icon="arrow-up"
+                                            aria-label="Send"
+                                            appearance={evaInput.trim() && !thinking ? 'primary' : undefined}
+                                            disabled={!evaInput.trim() || thinking}
+                                            onClick={sendTyped}
+                                        />
+                                    </div>
                                 </div>
-                                <SuggestionChipBar
-                                    chips={[
-                                        { label: 'Rejseudgifter januar', onClick: askTravel },
-                                        { label: 'Manglende godkendelser', onClick: askMissingApprovals },
-                                        { label: 'Top 5 udgiftskonti', onClick: askTopExpenses },
-                                    ]}
-                                />
+                                <div className="text-center text-[11px] text-grey-dark">EVA er en AI assistent og kan lave fejl.</div>
                             </div>
                         </Drawer.Footer>
                           </>
@@ -1064,23 +1163,73 @@ export default function App() {
 
 // ---------- Chat message component ----------
 
+function partsToText(parts: Part[]): string {
+    return parts
+        .map((p) => {
+            if (p.kind === 'text') return p.text.replace(/\*\*/g, '');
+            if (p.kind === 'kpi') return `${p.label}: ${p.value}${p.sub ? ` (${p.sub})` : ''}`;
+            if (p.kind === 'list') return `${p.title}\n` + p.items.map((it) => `· ${it.label}: ${it.value}`).join('\n');
+            if (p.kind === 'table') return [p.headers.join('\t'), ...p.rows.map((r) => r.join('\t'))].join('\n');
+            return '';
+        })
+        .filter(Boolean)
+        .join('\n\n');
+}
+
 function ChatMessage({ message }: { message: Message }) {
     const isUser = message.from === 'user';
+    const [feedback, setFeedback] = useState<'up' | 'down' | null>(null);
+    const [copied, setCopied] = useState(false);
+
+    function copyReply() {
+        void navigator.clipboard?.writeText(partsToText(message.parts));
+        setCopied(true);
+        setTimeout(() => setCopied(false), 1500);
+    }
+
+    const btn = 'eva-msg-action inline-flex items-center justify-center w-6 h-6 rounded hover:bg-grey-100 transition-colors';
+
     return (
-        <div className={'flex ' + (isUser ? 'justify-end' : 'justify-start')}>
+        <div className={'flex flex-col ' + (isUser ? 'items-end' : 'items-start')}>
             <div
-                style={isUser ? { backgroundColor: '#2563eb' } : undefined}
-                className={
-                    'max-w-[90%] rounded-lg self-start px-3 py-2 text-sm ' +
-                    (isUser
-                        ? 'text-white'
-                        : 'bg-white border border-grey-300 text-grey-darkest space-y-3')
-                }
+                style={{ backgroundColor: isUser ? '#BEBEBE' : '#EEEEEE', color: '#1C1C1C' }}
+                className={'max-w-[80%] rounded-lg px-4 py-3 text-sm leading-5 ' + (isUser ? '' : 'space-y-3')}
             >
                 {message.parts.map((part, i) => (
                     <PartView key={i} part={part} />
                 ))}
             </div>
+            {!isUser && (
+                <div className="mt-1 flex items-center gap-0.5 pl-1">
+                    <button
+                        type="button"
+                        aria-label="God besvarelse"
+                        aria-pressed={feedback === 'up'}
+                        onClick={() => setFeedback((f) => (f === 'up' ? null : 'up'))}
+                        className={btn}
+                    >
+                        <Icon name={feedback === 'up' ? 'thumb-up-solid' : 'thumb-up'} />
+                    </button>
+                    <button
+                        type="button"
+                        aria-label="Dårlig besvarelse"
+                        aria-pressed={feedback === 'down'}
+                        onClick={() => setFeedback((f) => (f === 'down' ? null : 'down'))}
+                        className={btn}
+                    >
+                        <Icon name={feedback === 'down' ? 'thumb-down-solid' : 'thumb-down'} />
+                    </button>
+                    <button
+                        type="button"
+                        aria-label={copied ? 'Kopieret' : 'Kopiér svar'}
+                        title={copied ? 'Kopieret' : 'Kopiér svar'}
+                        onClick={copyReply}
+                        className={btn}
+                    >
+                        <Icon name={copied ? 'tick' : 'copy'} />
+                    </button>
+                </div>
+            )}
         </div>
     );
 }
@@ -1089,7 +1238,7 @@ function PartView({ part }: { part: Part }) {
     if (part.kind === 'text') {
         const segs = part.text.split(/\*\*(.+?)\*\*/g);
         return (
-            <div className="leading-relaxed">
+            <div className="leading-5 whitespace-pre-line">
                 {segs.map((seg, i) =>
                     i % 2 === 1 ? (
                         <strong key={i} className="font-semibold">
@@ -1104,8 +1253,8 @@ function PartView({ part }: { part: Part }) {
     }
     if (part.kind === 'kpi') {
         return (
-            <div className="rounded border border-purple-200 bg-purple-50 px-3 py-2">
-                <div className="text-[11px] uppercase tracking-wide text-purple-700">{part.label}</div>
+            <div className="rounded border border-grey-300 bg-white px-3 py-2">
+                <div className="text-[11px] uppercase tracking-wide text-grey-dark">{part.label}</div>
                 <div className="text-xl font-semibold text-grey-darkest">{part.value}</div>
                 {part.sub && <div className="text-xs text-grey-dark mt-0.5">{part.sub}</div>}
             </div>
@@ -1153,8 +1302,8 @@ function PartView({ part }: { part: Part }) {
                             {it.bar !== undefined && (
                                 <div className="mt-0.5 h-1.5 bg-grey-100 rounded">
                                     <div
-                                        className="h-full bg-purple-400 rounded"
-                                        style={{ width: `${it.bar}%` }}
+                                        className="h-full rounded"
+                                        style={{ width: `${it.bar}%`, backgroundColor: '#2F5DBD' }}
                                     />
                                 </div>
                             )}
@@ -1184,6 +1333,8 @@ function PartView({ part }: { part: Part }) {
 
 type ChipDef = { label: string; onClick: () => void };
 
+/* Suggestion chips inside the input field. Collapsed: chips that fit on one line
+   plus a "+N" button (no scrollbar). Clicking "+N" expands to multiple lines. */
 function SuggestionChipBar({ chips }: { chips: ChipDef[] }) {
     const [expanded, setExpanded] = useState(false);
     const [containerWidth, setContainerWidth] = useState(0);
@@ -1213,7 +1364,7 @@ function SuggestionChipBar({ chips }: { chips: ChipDef[] }) {
         return () => ro.disconnect();
     }, []);
 
-    const gap = 8; // tailwind gap-2
+    const gap = 6; // tailwind gap-1.5
     let fitCount = chips.length;
     if (chipWidths.length === chips.length && containerWidth > 0) {
         const total = chipWidths.reduce((s, w, i) => s + w + (i > 0 ? gap : 0), 0);
@@ -1239,38 +1390,37 @@ function SuggestionChipBar({ chips }: { chips: ChipDef[] }) {
             <div
                 ref={measureRef}
                 aria-hidden
-                className="absolute flex gap-2 pointer-events-none opacity-0"
+                className="absolute flex gap-1.5 pointer-events-none opacity-0"
                 style={{ left: -9999, top: -9999 }}
             >
                 {chips.map((c) => (
                     <SuggestionChip key={c.label} onClick={() => {}}>{c.label}</SuggestionChip>
                 ))}
-                <button className="rounded-full border border-purple-300 bg-white px-3 py-1 text-xs text-purple-700 inline-flex items-center gap-1.5 whitespace-nowrap">
-                    +{Math.max(chips.length, 9)} mere
+                <button className="rounded-full border border-grey-300 bg-white px-3 py-1 text-xs text-grey-darkest inline-flex items-center gap-1.5 whitespace-nowrap">
+                    +{Math.max(chips.length, 9)}
                 </button>
             </div>
             <div
                 ref={containerRef}
-                className={
-                    'w-full ' + (expanded ? 'flex flex-wrap gap-2' : 'flex flex-nowrap gap-2 overflow-hidden')
-                }
+                className={'w-full ' + (expanded ? 'flex flex-wrap gap-1.5' : 'flex flex-nowrap gap-1.5 overflow-hidden')}
             >
                 {visible.map((c) => (
                     <SuggestionChip key={c.label} onClick={c.onClick}>{c.label}</SuggestionChip>
                 ))}
                 {!expanded && hiddenCount > 0 && (
                     <button
-                        className="rounded-full border border-purple-300 bg-white px-3 py-1 text-xs text-purple-700 hover:bg-purple-50 inline-flex items-center gap-1.5 whitespace-nowrap shrink-0"
+                        className="rounded-full border border-grey-300 bg-white px-3 py-1 text-xs text-grey-darkest hover:bg-grey-50 inline-flex items-center gap-1.5 whitespace-nowrap shrink-0"
                         onClick={() => setExpanded(true)}
                         aria-label={`Vis ${hiddenCount} flere forslag`}
                     >
-                        +{hiddenCount} mere
+                        +{hiddenCount}
                     </button>
                 )}
-                {expanded && chips.length > 0 && (
+                {expanded && hiddenCount > 0 && (
                     <button
-                        className="rounded-full border border-purple-300 bg-white px-3 py-1 text-xs text-purple-700 hover:bg-purple-50 inline-flex items-center gap-1.5 whitespace-nowrap shrink-0"
+                        className="rounded-full border border-grey-300 bg-white px-3 py-1 text-xs text-grey-darkest hover:bg-grey-50 inline-flex items-center gap-1.5 whitespace-nowrap shrink-0"
                         onClick={() => setExpanded(false)}
+                        aria-label="Vis færre forslag"
                     >
                         Vis færre
                     </button>
@@ -1283,10 +1433,10 @@ function SuggestionChipBar({ chips }: { chips: ChipDef[] }) {
 function SuggestionChip({ children, onClick }: { children: React.ReactNode; onClick: () => void }) {
     return (
         <button
-            className="rounded-full border border-purple-300 bg-white px-3 py-1 text-xs text-purple-700 hover:bg-purple-50 inline-flex items-center gap-1.5 whitespace-nowrap shrink-0"
+            className="rounded-full border border-grey-300 bg-white px-3 py-1 text-xs text-grey-darkest hover:bg-grey-50 inline-flex items-center gap-1.5 whitespace-nowrap shrink-0"
             onClick={onClick}
         >
-            <Icon name="ai-stars" />
+            <EvaLogo size={12} />
             {children}
         </button>
     );
@@ -1361,6 +1511,7 @@ function AICellOrText({
                 onAccept={onAccept}
                 onDecline={onDecline}
                 onAskEva={onAskEva}
+                fallbackClassName={fallbackClassName}
             />
         );
     }
@@ -1375,6 +1526,7 @@ function AISuggestedCell({
     onAccept,
     onDecline,
     onAskEva,
+    fallbackClassName,
 }: {
     row: Posting;
     field: SuggestableField;
@@ -1382,6 +1534,7 @@ function AISuggestedCell({
     onAccept: (rowId: number, field: SuggestableField) => void;
     onDecline: (rowId: number, field: SuggestableField) => void;
     onAskEva: (row: Posting, field: SuggestableField) => void;
+    fallbackClassName?: string;
 }) {
     const [open, setOpen] = useState(false);
     const [popoverCoords, setPopoverCoords] = useState<{ left: number; top: number } | null>(null);
@@ -1406,19 +1559,12 @@ function AISuggestedCell({
     }
 
     return (
-        <div ref={wrapRef} className="relative flex items-center w-full h-full" style={{ marginTop: -4 }}>
-            <div
-                className="group flex items-center gap-1.5 rounded border w-full px-2 py-1 text-xs"
-                style={{
-                    backgroundColor: '#F5F0FF',
-                    borderColor: '#C4B5FD',
-                    color: '#7C3AED',
-                }}
-            >
-                <span className="flex-1 truncate font-medium">{suggestion.value}</span>
+        <div ref={wrapRef} className="relative flex items-center w-full h-full">
+            <div className="group flex items-center gap-1.5 w-full">
+                <span className={'flex-1 truncate ' + (fallbackClassName ?? '')}>{suggestion.value}</span>
                 <button
                     className={
-                        'inline-flex items-center justify-center w-5 h-5 rounded hover:bg-purple-200 shrink-0 transition-opacity focus-visible:opacity-100 group-hover:opacity-100 ' +
+                        'inline-flex items-center justify-center w-5 h-5 rounded text-grey-400 hover:bg-grey-100 hover:text-grey-dark shrink-0 transition-opacity focus-visible:opacity-100 group-hover:opacity-100 ' +
                         (open ? 'opacity-100' : 'opacity-0')
                     }
                     aria-label="Forklar Eva's forslag"

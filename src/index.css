@@ -6,15 +6,157 @@
 html, body, #root { height: 100%; margin: 0; }
 #root { display: flex; }
 
+:root {
+    --eva-orange: #e89539;
+}
+
+/* ── Eva morphing mark (animated icon) ─────────────────────────────────── */
+.eva-logo {
+    display: inline-block;
+    overflow: visible; /* let goo-filter blur breathe past viewBox */
+    flex-shrink: 0;
+}
+.eva-logo .stage-group {
+    filter: url(#eva-goo-filter);
+}
+.eva-logo .c {
+    fill: var(--eva-fill, var(--eva-orange));
+    stroke: none;
+}
+@keyframes eva-idle-spin {
+    from { transform: translate(50px, 50px) rotate(0deg) translate(-50px, -50px); }
+    to { transform: translate(50px, 50px) rotate(360deg) translate(-50px, -50px); }
+}
+.eva-logo.idle-logo .stage-group {
+    animation: eva-idle-spin 60s linear infinite;
+}
+.eva-logo.idle-logo.thinking .stage-group {
+    animation-play-state: paused;
+}
+.eva-logo.idle-logo.thinking .c-wrap {
+    animation: none;
+    transform: none;
+}
+.eva-logo.white .c {
+    fill: #ffffff;
+}
+@media (prefers-reduced-motion: reduce) {
+    .eva-logo.idle-logo .stage-group { animation: none; }
+}
+
 /* When EVA drawer is embedded as a sibling, override Layout's hardcoded w-screen */
 #root > .flex.h-screen.w-screen.flex-col { width: auto !important; flex: 1 1 0%; min-width: 0; }
 
-/* Drawer close button is positioned for taco's default py-4 header — re-center for our slim py-2.5 header */
-[data-taco="drawer-outlet"] button[aria-label="Close"] { margin-top: 8px !important; }
-
-/* EVA drawer — soft purple tint that fades to white below (matches the EVA card pattern). */
+/* EVA chat drawer — plain white to match the production EVA panel. */
 [data-taco="drawer-outlet"] [data-taco="drawer"] {
-    background: linear-gradient(to bottom, rgba(243, 232, 255, 0.6), #ffffff 240px, #ffffff) !important;
+    background: #ffffff !important;
+}
+
+/* Eva message action icons (thumbs up/down + copy under a reply) — small, grey,
+   darken on hover / when active. taco's Icon hardcodes 1.715em, so pin the svg size. */
+.eva-msg-action { color: #767676; }
+.eva-msg-action:hover { color: #1c1c1c; }
+.eva-msg-action[aria-pressed="true"] { color: #1c1c1c; }
+.eva-msg-action [data-taco="icon"] { height: 16px !important; width: 16px !important; }
+
+/* ── Eva "thinking" state — morphing mark + grey status line (ported from eva-work) ── */
+.eva-msg-thinking {
+    align-self: flex-start;
+    padding: 4px 0;
+    display: flex;
+    align-items: center;
+    gap: 8px;
+}
+.eva-msg-thinking-text {
+    color: #8a8f98;
+    font-size: 13px;
+}
+/* Pure-CSS morph: the five circles cycle through 11 constellations while Eva thinks.
+   Runs on the browser animation timeline (no JS/frame), so the input stays responsive.
+   --eva-think-delay (random negative, set per send) starts each think on a different shape. */
+.eva-msg-thinking .eva-logo .c {
+    animation-duration: 5s;
+    animation-timing-function: ease-in-out;
+    animation-iteration-count: infinite;
+    animation-delay: var(--eva-think-delay, 0s);
+}
+.eva-msg-thinking .eva-logo .c1 { animation-name: eva-think-c1; }
+.eva-msg-thinking .eva-logo .c2 { animation-name: eva-think-c2; }
+.eva-msg-thinking .eva-logo .c3 { animation-name: eva-think-c3; }
+.eva-msg-thinking .eva-logo .c4 { animation-name: eva-think-c4; }
+.eva-msg-thinking .eva-logo .c5 { animation-name: eva-think-c5; }
+@keyframes eva-think-c1 {
+    0% { cx: 30px; cy: 30px; r: 16px; }
+    9.09% { cx: 58px; cy: 32px; r: 16px; }
+    18.18% { cx: 35px; cy: 22px; r: 16px; }
+    27.27% { cx: 62px; cy: 22px; r: 16px; }
+    36.36% { cx: 45px; cy: 22px; r: 16px; }
+    45.45% { cx: 65px; cy: 22px; r: 16px; }
+    54.55% { cx: 30px; cy: 70px; r: 16px; }
+    63.64% { cx: 60px; cy: 25px; r: 16px; }
+    72.73% { cx: 35px; cy: 25px; r: 16px; }
+    81.82% { cx: 18px; cy: 28px; r: 9px; }
+    90.91% { cx: 40px; cy: 22px; r: 14px; }
+    100% { cx: 30px; cy: 30px; r: 16px; }
+}
+@keyframes eva-think-c2 {
+    0% { cx: 45px; cy: 48px; r: 11px; }
+    9.09% { cx: 42px; cy: 22px; r: 10px; }
+    18.18% { cx: 55px; cy: 28px; r: 11px; }
+    27.27% { cx: 58px; cy: 44px; r: 11px; }
+    36.36% { cx: 52px; cy: 42px; r: 11px; }
+    45.45% { cx: 50px; cy: 36px; r: 10px; }
+    54.55% { cx: 50px; cy: 80px; r: 12px; }
+    63.64% { cx: 70px; cy: 45px; r: 11px; }
+    72.73% { cx: 55px; cy: 22px; r: 10px; }
+    81.82% { cx: 55px; cy: 18px; r: 11px; }
+    90.91% { cx: 25px; cy: 40px; r: 11px; }
+    100% { cx: 45px; cy: 48px; r: 11px; }
+}
+@keyframes eva-think-c3 {
+    0% { cx: 60px; cy: 66px; r: 8px; }
+    9.09% { cx: 28px; cy: 58px; r: 9px; }
+    18.18% { cx: 52px; cy: 68px; r: 9px; }
+    27.27% { cx: 50px; cy: 66px; r: 8px; }
+    36.36% { cx: 60px; cy: 60px; r: 9px; }
+    45.45% { cx: 40px; cy: 54px; r: 8px; }
+    54.55% { cx: 65px; cy: 65px; r: 10px; }
+    63.64% { cx: 55px; cy: 55px; r: 9px; }
+    72.73% { cx: 45px; cy: 42px; r: 8px; }
+    81.82% { cx: 60px; cy: 50px; r: 10px; }
+    90.91% { cx: 40px; cy: 58px; r: 10px; }
+    100% { cx: 60px; cy: 66px; r: 8px; }
+}
+@keyframes eva-think-c4 {
+    0% { cx: 75px; cy: 22px; r: 10px; }
+    9.09% { cx: 78px; cy: 55px; r: 8px; }
+    18.18% { cx: 18px; cy: 55px; r: 8px; }
+    27.27% { cx: 82px; cy: 82px; r: 8px; }
+    36.36% { cx: 22px; cy: 72px; r: 11px; }
+    45.45% { cx: 50px; cy: 72px; r: 6px; }
+    54.55% { cx: 75px; cy: 25px; r: 8px; }
+    63.64% { cx: 20px; cy: 30px; r: 7px; }
+    72.73% { cx: 75px; cy: 65px; r: 11px; }
+    81.82% { cx: 78px; cy: 60px; r: 14px; }
+    90.91% { cx: 70px; cy: 50px; r: 8px; }
+    100% { cx: 75px; cy: 22px; r: 10px; }
+}
+@keyframes eva-think-c5 {
+    0% { cx: 14px; cy: 80px; r: 8px; }
+    9.09% { cx: 55px; cy: 82px; r: 11px; }
+    18.18% { cx: 80px; cy: 75px; r: 11px; }
+    27.27% { cx: 18px; cy: 76px; r: 8px; }
+    36.36% { cx: 78px; cy: 30px; r: 9px; }
+    45.45% { cx: 80px; cy: 80px; r: 6px; }
+    54.55% { cx: 30px; cy: 20px; r: 8px; }
+    63.64% { cx: 25px; cy: 80px; r: 7px; }
+    72.73% { cx: 22px; cy: 75px; r: 8px; }
+    81.82% { cx: 28px; cy: 80px; r: 7px; }
+    90.91% { cx: 85px; cy: 75px; r: 8px; }
+    100% { cx: 14px; cy: 80px; r: 8px; }
+}
+@media (prefers-reduced-motion: reduce) {
+    .eva-msg-thinking .eva-logo .c { animation: none; }
 }
 
 #kassekladde-table { width: 100%; flex: 1 1 0%; min-height: 0; }
