@@ -9,8 +9,10 @@ import {
     Menu,
     Navigation2,
     Table3,
+    Tabs,
 } from '@economic/taco';
 import { EvaLogo, EvaLogoDefs } from './components/EvaLogo';
+import { loadSnapshot, buildContext, hasEconomicCredentials } from './evaData';
 
 type AISuggestion = {
     value: string;
@@ -114,14 +116,29 @@ type ActionsPart = { kind: 'actions'; actions: { label: string; appearance?: 'pr
 
 type Part = { kind: 'text'; text: string } | KpiPart | TablePart | ListPart | ActionsPart;
 
-type Message = { id: number; from: 'user' | 'eva'; parts: Part[] };
+type Message = { id: number; from: 'user' | 'eva'; parts: Part[]; createdAt?: number };
 
 type Conversation = {
     id: number;
     title: string;
     messages: Message[];
     updatedAt: number;
+    archived?: boolean;
 };
+
+// Date buckets for navigating conversation history.
+const CONV_GROUP_ORDER = ['I dag', 'I går', 'Sidste 7 dage', 'Ældre'] as const;
+type ConvGroup = (typeof CONV_GROUP_ORDER)[number];
+
+function conversationDateGroup(ts: number): ConvGroup {
+    const start = new Date();
+    start.setHours(0, 0, 0, 0);
+    const today = start.getTime();
+    if (ts >= today) return 'I dag';
+    if (ts >= today - 86400000) return 'I går';
+    if (ts >= today - 6 * 86400000) return 'Sidste 7 dage';
+    return 'Ældre';
+}
 
 // ---------- App ----------
 
@@ -132,9 +149,64 @@ let nextConvId = 100;
 // reads like Eva is narrating what it's doing (ported from the eva-work prototype).
 const THINK_PHRASES = ['Tænker…', 'Kigger i kassekladden…', 'Samler data…', 'Skriver svar…'];
 
+// ─── Gemini (real AI answers via the /api/gemini dev proxy) ─────────────────
+// Ported from eva-advisor. The key comes from .env (VITE_GEMINI_API_KEY) and is
+// only used locally through Vite's proxy — never commit .env / never deploy this.
+const GEMINI_KEY = import.meta.env.VITE_GEMINI_API_KEY || '';
+const GEMINI_MODELS = ['gemini-3.1-flash-lite-preview', 'gemini-2.5-flash'];
+const EVA_SYSTEM_PROMPT = [
+    'Du er EVA, e-conomics AI-assistent til bogføring og regnskab.',
+    'Svar altid på dansk — kort, konkret og venligt, gerne med punktopstilling ved lister.',
+    'Dette er en tidlig prototype: du har endnu IKKE adgang til brugerens rigtige regnskabsdata.',
+    'Hvis du bliver spurgt om konkrete tal, bilag eller posteringer, så sig kort at data-integrationen er på vej,',
+    'og giv et generelt fagligt svar hvor det giver mening. Find aldrig på specifikke beløb eller bilagsnumre.',
+].join(' ');
+
+// Data-aware prompt (Phase 2): used when real e-conomic data is attached as context.
+const EVA_DATA_SYSTEM_PROMPT = [
+    'Du er EVA, e-conomics AI-assistent til bogføring og regnskab.',
+    'Svar altid på dansk — kort, konkret og venligt, gerne med punktopstilling ved lister.',
+    'Brug KUN de vedlagte data nedenfor til at svare — gæt aldrig og find aldrig på tal, bilag, konti eller kunder.',
+    'Hvis svaret ikke kan udledes af de vedlagte data, så sig det ærligt.',
+    'Formater beløb i dansk notation (fx 12.500 kr). Start ikke med at præsentere dig selv — gå direkte til svaret.',
+].join(' ');
+
+type GeminiTurn = { role: 'user' | 'model'; text: string };
+
+async function askGemini(history: GeminiTurn[], systemPrompt: string = EVA_SYSTEM_PROMPT): Promise<string> {
+    if (!GEMINI_KEY) throw new Error('Gemini-nøglen mangler (VITE_GEMINI_API_KEY i .env).');
+    // Gemini requires the first turn to be from the user.
+    const turns = [...history];
+    while (turns.length && turns[0].role === 'model') turns.shift();
+    const body = JSON.stringify({
+        systemInstruction: { parts: [{ text: systemPrompt }] },
+        contents: turns.map((t) => ({ role: t.role, parts: [{ text: t.text }] })),
+        generationConfig: { temperature: 0.7, maxOutputTokens: 800 },
+    });
+    for (const model of GEMINI_MODELS) {
+        try {
+            const res = await fetch(`/api/gemini/v1beta/models/${model}:generateContent?key=${GEMINI_KEY}`, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body,
+            });
+            if (!res.ok) continue;
+            const json = await res.json();
+            const text: string = (json?.candidates?.[0]?.content?.parts ?? [])
+                .map((p: { text?: string }) => p.text ?? '')
+                .join('');
+            if (text.trim()) return text.trim();
+        } catch {
+            /* try next model */
+        }
+    }
+    throw new Error('Kunne ikke få svar fra Gemini.');
+}
+
 const greetingMessage: Message = {
     id: 1,
     from: 'eva',
+    createdAt: Date.now(),
     parts: [
         {
             kind: 'text',
@@ -166,6 +238,7 @@ const seedConversations: Conversation[] = [
             {
                 id: 12,
                 from: 'eva',
+                createdAt: NOW - 3 * 60 * 60 * 1000,
                 parts: [
                     { kind: 'text', text: 'I januar 2026 har I brugt **8.030 kr** på rejser fordelt på 3 posteringer på konto 6210 Rejseudgifter.' },
                     { kind: 'kpi', label: 'Rejseudgifter januar', value: '8.030 kr', sub: '3 posteringer · konto 6210' },
@@ -182,6 +255,7 @@ const seedConversations: Conversation[] = [
             {
                 id: 22,
                 from: 'eva',
+                createdAt: NOW - 24 * 60 * 60 * 1000,
                 parts: [
                     { kind: 'text', text: 'Der er **3 posteringer** der mangler godkendelse fra dig før de kan bogføres.' },
                 ],
@@ -197,6 +271,7 @@ const seedConversations: Conversation[] = [
             {
                 id: 32,
                 from: 'eva',
+                createdAt: NOW - 3 * 24 * 60 * 60 * 1000,
                 parts: [
                     { kind: 'text', text: 'Begge bogføres på **6520 Software**. Adobe Creative Cloud (Bilag 7) og Webhosting januar (Bilag 14) deler den samme konto-mønster.' },
                 ],
@@ -218,6 +293,20 @@ function formatRelativeTime(ts: number): string {
     return new Date(ts).toLocaleDateString('da-DK', { day: '2-digit', month: 'short' });
 }
 
+// Timestamp shown under an Eva reply: < 1 hour → "x minutter siden";
+// 1 hour–1 day → time (14.32); older → date + time (7. jul. 14.32).
+function formatMessageTime(ts: number): string {
+    const diffMs = Date.now() - ts;
+    const diffMin = Math.floor(diffMs / 60000);
+    if (diffMin < 1) return 'lige nu';
+    if (diffMin < 60) return `${diffMin} ${diffMin === 1 ? 'minut' : 'minutter'} siden`;
+    const d = new Date(ts);
+    const time = d.toLocaleTimeString('da-DK', { hour: '2-digit', minute: '2-digit' });
+    if (diffMs < 24 * 60 * 60 * 1000) return time;
+    const date = d.toLocaleDateString('da-DK', { day: 'numeric', month: 'short' });
+    return `${date} ${time}`;
+}
+
 function previewMessage(messages: Message[]): string {
     const last = [...messages].reverse().find((m) => m.parts.some((p) => p.kind === 'text'));
     if (!last) return '';
@@ -234,17 +323,30 @@ export default function App() {
     const [highlightedRowId, setHighlightedRowId] = useState<number | null>(null);
     const conversationEndRef = useRef<HTMLDivElement>(null);
     const evaInputRef = useRef<HTMLTextAreaElement>(null);
+    // Cached real-data context for the Gemini prompt (loaded once per session).
+    const snapshotContextRef = useRef<string | null>(null);
+    const snapshotLoadingRef = useRef<Promise<string> | null>(null);
 
     const [conversations, setConversations] = useState<Conversation[]>(seedConversations);
     const [activeConversationId, setActiveConversationId] = useState<number | null>(1);
     const [openMenuConvId, setOpenMenuConvId] = useState<number | null>(null);
     const [renamingConvId, setRenamingConvId] = useState<number | null>(null);
+    const [listTab, setListTab] = useState<'chats' | 'log' | 'flows'>('chats');
+    const [convQuery, setConvQuery] = useState('');
+    const [convFilter, setConvFilter] = useState<'active' | 'archived'>('active');
+    const [searchOpen, setSearchOpen] = useState(false);
+    const [sortOpen, setSortOpen] = useState(false);
+    const [sortMode, setSortMode] = useState<'newest' | 'oldest' | 'title'>('newest');
 
     // Eva "thinking" state — while true, the morphing mark + a cycling status line
     // are shown in the conversation until the reply lands.
     const [thinking, setThinking] = useState(false);
     const [thinkDelay, setThinkDelay] = useState(0); // random negative offset → different start shape each send
     const [thinkPhrase, setThinkPhrase] = useState(0);
+
+    // Resizable chat panel width (px), dragged via a handle on the drawer's left edge.
+    const [chatWidth, setChatWidth] = useState(420);
+    const [resizing, setResizing] = useState(false);
 
     // While thinking, advance the status line every 700ms (stops at the last phrase).
     useEffect(() => {
@@ -264,6 +366,53 @@ export default function App() {
         el.style.height = Math.min(el.scrollHeight, 160) + 'px';
     }, [evaInput, evaOpen, activeConversationId]);
 
+    // Make the chat resizable. Two taco elements carry the width and must stay in sync,
+    // or the drawer clips (sizer wider than outlet) or leaves white space (outlet wider
+    // than sizer): the OUTLET (flex item that reserves page space) and taco's inner
+    // SIZER wrapper (has a fixed w-[420px] from the md size + the --drawer-swipe vars).
+    // The panel fills the sizer on its own, so we leave it alone. Clear widths on close
+    // so the drawer collapses; kill the transition while dragging so it tracks the pointer.
+    useEffect(() => {
+        const outlet = document.querySelector('[data-taco="drawer-outlet"]') as HTMLElement | null;
+        const sizer = document.querySelector(
+            '[data-taco="drawer-outlet"] [style*="--drawer-swipe-progress"]'
+        ) as HTMLElement | null;
+        [outlet, sizer].forEach((el) => {
+            if (!el) return;
+            el.style.transition = resizing ? 'none' : '';
+            if (evaOpen) {
+                el.style.width = chatWidth + 'px';
+                el.style.maxWidth = 'none';
+            } else {
+                el.style.width = '';
+                el.style.maxWidth = '';
+            }
+        });
+    }, [evaOpen, chatWidth, resizing]);
+
+    // Drag-to-resize: follow the pointer while a resize is in progress.
+    useEffect(() => {
+        if (!resizing) return;
+        const onMove = (e: MouseEvent) => {
+            const w = window.innerWidth - e.clientX;
+            const max = Math.round(window.innerWidth * 0.4); // max 40% of screen width
+            setChatWidth(Math.max(340, Math.min(max, w)));
+        };
+        const onUp = () => setResizing(false);
+        document.addEventListener('mousemove', onMove);
+        document.addEventListener('mouseup', onUp);
+        const prevCursor = document.body.style.cursor;
+        const prevSelect = document.body.style.userSelect;
+        document.body.style.cursor = 'col-resize';
+        document.body.style.userSelect = 'none';
+        return () => {
+            document.removeEventListener('mousemove', onMove);
+            document.removeEventListener('mouseup', onUp);
+            document.body.style.cursor = prevCursor;
+            document.body.style.userSelect = prevSelect;
+        };
+    }, [resizing]);
+
     function commitRename(id: number, newTitle: string) {
         const trimmed = newTitle.trim();
         if (!trimmed) {
@@ -281,7 +430,7 @@ export default function App() {
     const messages = activeConversation?.messages ?? [];
 
     function pushMessages(...newMsgs: Omit<Message, 'id'>[]) {
-        const stamped = newMsgs.map((m) => ({ ...m, id: ++nextMsgId }));
+        const stamped = newMsgs.map((m) => ({ ...m, id: ++nextMsgId, createdAt: m.createdAt ?? Date.now() }));
         // First user message in a new "Ny samtale" conv → use it as the title
         const firstUserText = (() => {
             if (!activeConversation || activeConversation.title !== 'Ny samtale') return null;
@@ -320,7 +469,7 @@ export default function App() {
         const newConv: Conversation = {
             id: ++nextConvId,
             title: 'Ny samtale',
-            messages: [{ ...greetingMessage, id: ++nextMsgId }],
+            messages: [{ ...greetingMessage, id: ++nextMsgId, createdAt: Date.now() }],
             updatedAt: Date.now(),
         };
         setConversations((prev) => [newConv, ...prev]);
@@ -602,23 +751,143 @@ export default function App() {
         );
     }
 
-    function sendTyped() {
+    async function sendTyped() {
         const text = evaInput.trim();
         if (!text || thinking) return;
         setEvaInput('');
-        respond(
-            { from: 'user', parts: [{ kind: 'text', text }] },
-            {
-                from: 'eva',
-                parts: [
-                    {
-                        kind: 'text',
-                        text: 'Det er et godt spørgsmål — i en rigtig version af Eva ville jeg her trække data fra dine bøger og svare præcist. I prototypen kan du prøve forslagene øverst i samtalen.',
-                    },
-                ],
+        // Flatten the conversation so far into Gemini turns, then add the new question.
+        const history: GeminiTurn[] = (activeConversation?.messages ?? [])
+            .map((m) => ({ role: (m.from === 'eva' ? 'model' : 'user') as 'user' | 'model', text: partsToText(m.parts) }))
+            .filter((t) => t.text.trim());
+        history.push({ role: 'user', text });
+        pushMessages({ from: 'user', parts: [{ kind: 'text', text }] });
+        setThinkDelay(-(Math.random() * 5));
+        setThinkPhrase(0);
+        setThinking(true);
+        try {
+            // Ground EVA in real e-conomic data when credentials are present (loaded once, cached).
+            let systemPrompt: string | undefined;
+            if (hasEconomicCredentials()) {
+                try {
+                    if (snapshotContextRef.current == null) {
+                        if (!snapshotLoadingRef.current) snapshotLoadingRef.current = loadSnapshot().then(buildContext);
+                        snapshotContextRef.current = await snapshotLoadingRef.current;
+                    }
+                    if (snapshotContextRef.current) {
+                        systemPrompt = `${EVA_DATA_SYSTEM_PROMPT}\n\n${snapshotContextRef.current}`;
+                    }
+                } catch {
+                    /* couldn't load data → fall back to the no-data prompt */
+                }
             }
-        );
+            const answer = await askGemini(history, systemPrompt);
+            pushMessages({ from: 'eva', parts: [{ kind: 'text', text: answer }] });
+        } catch (e) {
+            pushMessages({
+                from: 'eva',
+                parts: [{ kind: 'text', text: `Beklager, jeg kunne ikke svare lige nu. ${e instanceof Error ? e.message : ''}`.trim() }],
+            });
+        } finally {
+            setThinking(false);
+        }
     }
+
+    // ── Chats tab: search + archive filter + sort + date grouping ──
+    const convSearch = convQuery.trim().toLowerCase();
+    const filteredConversations = conversations
+        .filter((c) => (convFilter === 'archived' ? !!c.archived : !c.archived))
+        .filter(
+            (c) =>
+                !convSearch ||
+                c.title.toLowerCase().includes(convSearch) ||
+                c.messages.some((m) => partsToText(m.parts).toLowerCase().includes(convSearch))
+        );
+    const sortCmp =
+        sortMode === 'oldest'
+            ? (a: Conversation, b: Conversation) => a.updatedAt - b.updatedAt
+            : sortMode === 'title'
+              ? (a: Conversation, b: Conversation) => a.title.localeCompare(b.title, 'da')
+              : (a: Conversation, b: Conversation) => b.updatedAt - a.updatedAt;
+    const sortedConversations = [...filteredConversations].sort(sortCmp);
+    // Date groups only make sense for date sorts; title sort is a flat list.
+    const useDateGroups = sortMode !== 'title';
+    const convGroupOrder = sortMode === 'oldest' ? [...CONV_GROUP_ORDER].reverse() : [...CONV_GROUP_ORDER];
+    const conversationGroups: { group: ConvGroup | null; items: Conversation[] }[] = useDateGroups
+        ? convGroupOrder
+              .map((group) => ({ group, items: sortedConversations.filter((c) => conversationDateGroup(c.updatedAt) === group) }))
+              .filter((g) => g.items.length > 0)
+        : [{ group: null, items: sortedConversations }];
+    const sortLabel = sortMode === 'oldest' ? 'Ældste' : sortMode === 'title' ? 'Titel' : 'Nyeste';
+
+    const renderConvRow = (c: Conversation) => (
+        <div
+            key={c.id}
+            role="button"
+            tabIndex={0}
+            onClick={() => setActiveConversationId(c.id)}
+            onKeyDown={(e) => {
+                if (e.key === 'Enter' || e.key === ' ') {
+                    e.preventDefault();
+                    setActiveConversationId(c.id);
+                }
+            }}
+            className="group relative rounded p-2 hover:bg-grey-100 transition-colors cursor-pointer"
+        >
+            <div className="flex items-center justify-between gap-2">
+                {renamingConvId === c.id ? (
+                    <div className="flex-1 min-w-0" onClick={(e) => e.stopPropagation()} onKeyDown={(e) => e.stopPropagation()}>
+                        <RenameInput
+                            initialValue={c.title}
+                            onCommit={(v) => commitRename(c.id, v)}
+                            onCancel={cancelRename}
+                            className="font-bold text-sm text-grey-darkest bg-white border border-grey-300 rounded px-1 py-0 w-full outline-none focus:ring-2 focus:ring-blue-300"
+                        />
+                    </div>
+                ) : (
+                    <div className="font-bold text-sm text-grey-darkest truncate">{c.title}</div>
+                )}
+                <div className="text-[11px] text-grey-dark shrink-0">{formatRelativeTime(c.updatedAt)}</div>
+            </div>
+            <div className="text-xs text-grey-dark truncate mt-0.5">{previewMessage(c.messages)}</div>
+            <div
+                className={
+                    'absolute inset-y-0 right-0 flex items-center pl-10 pr-1.5 rounded-r bg-gradient-to-l from-grey-100 from-50% to-transparent transition-opacity ' +
+                    (openMenuConvId === c.id ? 'opacity-100' : 'opacity-0 pointer-events-none group-hover:opacity-100 group-hover:pointer-events-auto')
+                }
+                onClick={(e) => e.stopPropagation()}
+                onKeyDown={(e) => e.stopPropagation()}
+            >
+                <Menu
+                    open={openMenuConvId === c.id}
+                    onChange={(o) => setOpenMenuConvId(o ? c.id : null)}
+                    trigger={
+                        <button
+                            type="button"
+                            aria-label="Flere handlinger"
+                            className="inline-flex items-center justify-center w-7 h-7 rounded bg-white border border-grey-300 text-grey-darkest hover:bg-grey-50 shadow-sm"
+                        >
+                            <Icon name="ellipsis-vertical" />
+                        </button>
+                    }
+                >
+                    <Menu.Content>
+                        <Menu.Item onClick={() => setRenamingConvId(c.id)}>Omdøb</Menu.Item>
+                        <Menu.Item onClick={() => setConversations((prev) => prev.map((x) => (x.id === c.id ? { ...x, archived: !x.archived } : x)))}>
+                            {c.archived ? 'Fjern fra arkiv' : 'Arkivér'}
+                        </Menu.Item>
+                        <Menu.Item
+                            onClick={() => {
+                                setConversations((prev) => prev.filter((x) => x.id !== c.id));
+                                if (activeConversationId === c.id) setActiveConversationId(null);
+                            }}
+                        >
+                            Slet samtale
+                        </Menu.Item>
+                    </Menu.Content>
+                </Menu>
+            </div>
+        </div>
+    );
 
     return (
         <>
@@ -906,7 +1175,23 @@ export default function App() {
                 showCloseButton={false}
             >
                 <Drawer.Content aria-label="Eva AI-assistent">
+                    <div
+                        role="separator"
+                        aria-orientation="vertical"
+                        aria-label="Træk for at ændre Eva-panelets bredde"
+                        onMouseDown={(e) => {
+                            e.preventDefault();
+                            setResizing(true);
+                        }}
+                        className="absolute left-0 inset-y-0 w-1.5 z-30 cursor-col-resize hover:bg-grey-300/70 transition-colors"
+                    />
                     <div className="absolute right-3 top-3 z-20 flex items-center gap-1">
+                        <span
+                            className="mr-1 text-[13px] leading-5 px-1.5 rounded-full shrink-0"
+                            style={{ backgroundColor: '#E2DCFF', color: '#473279' }}
+                        >
+                            Alpha
+                        </span>
                         <IconButton
                             icon="thumb-both"
                             appearance="discrete"
@@ -928,9 +1213,20 @@ export default function App() {
                             }}
                         />
                     </div>
-                    <Drawer.Title className="!text-base !py-4 !px-5 !pr-24 !items-center !bg-transparent">
+                    <Drawer.Title className={'!text-base !py-4 !px-5 !pr-36 !items-center !bg-transparent' + (activeConversation ? '' : ' !border-b-0')}>
                         <span className="flex h-full items-center gap-2 leading-none min-w-0">
-                            <EvaLogo size={20} className="shrink-0" />
+                            {activeConversation ? (
+                                <IconButton
+                                    icon="menu"
+                                    appearance="discrete"
+                                    aria-label="Vis samtaler"
+                                    tooltip="Vis samtaler"
+                                    onClick={() => setActiveConversationId(null)}
+                                    className="shrink-0"
+                                />
+                            ) : (
+                                <EvaLogo size={20} className="shrink-0" />
+                            )}
                             {activeConversation ? (
                                 <>
                                     <button
@@ -940,7 +1236,6 @@ export default function App() {
                                     >
                                         EVA
                                     </button>
-                                    <span className="text-[13px] leading-5 px-1.5 rounded-full shrink-0" style={{ backgroundColor: '#E2DCFF', color: '#473279' }}>Alpha</span>
                                     <span className="text-grey-dark shrink-0">/</span>
                                     {renamingConvId === activeConversation.id ? (
                                         <RenameInput
@@ -962,96 +1257,156 @@ export default function App() {
                             ) : (
                                 <>
                                     <span className="font-semibold text-grey-darkest">EVA</span>
-                                    <span className="text-[13px] leading-5 px-1.5 rounded-full shrink-0" style={{ backgroundColor: '#E2DCFF', color: '#473279' }}>Alpha</span>
                                 </>
                             )}
                         </span>
                     </Drawer.Title>
                     <div className="flex flex-col h-full min-h-0">
                         {!activeConversation ? (
-                            <>
-                                <div className="flex-1 min-h-0 overflow-y-auto">
-                                    <div className="px-2 pt-3 pb-3 space-y-1">
-                                        {[...conversations].sort((a, b) => b.updatedAt - a.updatedAt).map((c) => (
-                                            <div
-                                                key={c.id}
-                                                role="button"
-                                                tabIndex={0}
-                                                onClick={() => setActiveConversationId(c.id)}
+                            <Tabs
+                                id={listTab}
+                                onChange={(id) => setListTab(id as 'chats' | 'log' | 'flows')}
+                                className="flex flex-col flex-1 min-h-0"
+                            >
+                                <Tabs.List className="!px-4 !mb-0 shrink-0">
+                                    <Tabs.Trigger id="chats">Chats</Tabs.Trigger>
+                                    <Tabs.Trigger id="log">Log</Tabs.Trigger>
+                                    <Tabs.Trigger id="flows">Flows</Tabs.Trigger>
+                                </Tabs.List>
+                                <Tabs.Content id="chats" className="flex-1 min-h-0 overflow-y-auto px-6 pt-3 pb-4">
+                                    <button
+                                        type="button"
+                                        onClick={startNewConversation}
+                                        className="flex items-center gap-2.5 w-full text-left rounded-lg px-3 py-2.5 mb-4 text-sm font-medium text-grey-darkest hover:brightness-95 transition"
+                                        style={{ background: 'rgba(15, 23, 42, 0.05)' }}
+                                    >
+                                        <Icon name="circle-plus" /> Ny samtale
+                                    </button>
+                                    {/* Controls: filter (left) · sort + search toggle (right) */}
+                                    <div className="flex items-center justify-between gap-2 mb-3">
+                                        <div className="flex items-center gap-1">
+                                            {(['active', 'archived'] as const).map((f) => (
+                                                <button
+                                                    key={f}
+                                                    type="button"
+                                                    onClick={() => setConvFilter(f)}
+                                                    className={
+                                                        'rounded-full px-3 py-1 text-xs font-medium transition-colors ' +
+                                                        (convFilter === f ? 'bg-grey-200 text-grey-darkest' : 'text-grey-dark hover:bg-grey-100')
+                                                    }
+                                                >
+                                                    {f === 'active' ? 'Aktive' : 'Arkiverede'}
+                                                </button>
+                                            ))}
+                                        </div>
+                                        <div className="flex items-center gap-0.5 shrink-0">
+                                            <Menu
+                                                open={sortOpen}
+                                                onChange={setSortOpen}
+                                                trigger={
+                                                    <button
+                                                        type="button"
+                                                        aria-label="Sortér"
+                                                        className="inline-flex items-center gap-1 rounded-md px-2 py-1 text-xs font-medium text-grey-dark hover:bg-grey-100"
+                                                    >
+                                                        {sortLabel}
+                                                        <Icon name="chevron-down-solid" className="!h-3 !w-3" />
+                                                    </button>
+                                                }
+                                            >
+                                                <Menu.Content>
+                                                    <Menu.Item onClick={() => setSortMode('newest')}>Nyeste først</Menu.Item>
+                                                    <Menu.Item onClick={() => setSortMode('oldest')}>Ældste først</Menu.Item>
+                                                    <Menu.Item onClick={() => setSortMode('title')}>Titel (A–Å)</Menu.Item>
+                                                </Menu.Content>
+                                            </Menu>
+                                            <button
+                                                type="button"
+                                                aria-label="Søg i samtaler"
+                                                onClick={() =>
+                                                    setSearchOpen((o) => {
+                                                        const next = !o;
+                                                        if (!next) setConvQuery('');
+                                                        return next;
+                                                    })
+                                                }
+                                                className={
+                                                    'inline-flex items-center justify-center w-7 h-7 rounded-md transition-colors ' +
+                                                    (searchOpen ? 'bg-grey-100 text-grey-darkest' : 'text-grey-dark hover:bg-grey-100')
+                                                }
+                                            >
+                                                <Icon name="search-bold" className="!h-4 !w-4" />
+                                            </button>
+                                        </div>
+                                    </div>
+                                    {/* Fold-out search */}
+                                    {searchOpen && (
+                                        <div className="relative mb-3">
+                                            <span className="absolute left-2.5 top-1/2 -translate-y-1/2 text-grey-dark pointer-events-none">
+                                                <Icon name="search-bold" className="!h-4 !w-4" />
+                                            </span>
+                                            <input
+                                                autoFocus
+                                                type="text"
+                                                value={convQuery}
+                                                onChange={(e) => setConvQuery(e.target.value)}
                                                 onKeyDown={(e) => {
-                                                    if (e.key === 'Enter' || e.key === ' ') {
-                                                        e.preventDefault();
-                                                        setActiveConversationId(c.id);
+                                                    if (e.key === 'Escape') {
+                                                        setConvQuery('');
+                                                        setSearchOpen(false);
                                                     }
                                                 }}
-                                                className="group relative rounded p-2 hover:bg-grey-100 transition-colors cursor-pointer"
-                                            >
-                                                <div className="flex items-center justify-between gap-2">
-                                                    {renamingConvId === c.id ? (
-                                                        <div
-                                                            className="flex-1 min-w-0"
-                                                            onClick={(e) => e.stopPropagation()}
-                                                            onKeyDown={(e) => e.stopPropagation()}
-                                                        >
-                                                            <RenameInput
-                                                                initialValue={c.title}
-                                                                onCommit={(v) => commitRename(c.id, v)}
-                                                                onCancel={cancelRename}
-                                                                className="font-bold text-sm text-grey-darkest bg-white border border-grey-300 rounded px-1 py-0 w-full outline-none focus:ring-2 focus:ring-blue-300"
-                                                            />
-                                                        </div>
-                                                    ) : (
-                                                        <div className="font-bold text-sm text-grey-darkest truncate">{c.title}</div>
-                                                    )}
-                                                    <div className="text-[11px] text-grey-dark shrink-0">{formatRelativeTime(c.updatedAt)}</div>
-                                                </div>
-                                                <div className="text-xs text-grey-dark truncate mt-0.5">{previewMessage(c.messages)}</div>
-                                                <div
-                                                    className={
-                                                        'absolute inset-y-0 right-0 flex items-center pl-10 pr-1.5 rounded-r bg-gradient-to-l from-grey-100 from-50% to-transparent transition-opacity ' +
-                                                        (openMenuConvId === c.id ? 'opacity-100' : 'opacity-0 pointer-events-none group-hover:opacity-100 group-hover:pointer-events-auto')
-                                                    }
-                                                    onClick={(e) => e.stopPropagation()}
-                                                    onKeyDown={(e) => e.stopPropagation()}
+                                                placeholder="Søg i samtaler…"
+                                                className="w-full rounded-lg border border-grey-300 bg-white pl-8 pr-8 py-2 text-sm text-grey-darkest focus:outline-none focus:ring-2 focus:ring-blue-300"
+                                            />
+                                            {convQuery && (
+                                                <button
+                                                    type="button"
+                                                    aria-label="Ryd søgning"
+                                                    onClick={() => setConvQuery('')}
+                                                    className="absolute right-2 top-1/2 -translate-y-1/2 text-grey-dark hover:text-grey-darkest"
                                                 >
-                                                    <Menu
-                                                        open={openMenuConvId === c.id}
-                                                        onChange={(o) => setOpenMenuConvId(o ? c.id : null)}
-                                                        trigger={
-                                                            <button
-                                                                type="button"
-                                                                aria-label="Flere handlinger"
-                                                                className="inline-flex items-center justify-center w-7 h-7 rounded bg-white border border-grey-300 text-grey-darkest hover:bg-grey-50 shadow-sm"
-                                                            >
-                                                                <Icon name="ellipsis-vertical" />
-                                                            </button>
-                                                        }
-                                                    >
-                                                        <Menu.Content>
-                                                            <Menu.Item onClick={() => setRenamingConvId(c.id)}>Omdøb</Menu.Item>
-                                                            <Menu.Item onClick={() => { /* placeholder: archive */ }}>Arkivér</Menu.Item>
-                                                            <Menu.Item onClick={() => { /* placeholder: delete */ }}>Slet samtale</Menu.Item>
-                                                        </Menu.Content>
-                                                    </Menu>
-                                                </div>
+                                                    <Icon name="close" className="!h-4 !w-4" />
+                                                </button>
+                                            )}
+                                        </div>
+                                    )}
+                                    {/* Grouped list / empty state */}
+                                    {filteredConversations.length === 0 ? (
+                                        <div className="text-center text-sm text-grey-dark py-8">
+                                            {convSearch
+                                                ? `Ingen samtaler matcher "${convQuery.trim()}".`
+                                                : convFilter === 'archived'
+                                                  ? 'Ingen arkiverede samtaler.'
+                                                  : 'Ingen samtaler endnu.'}
+                                        </div>
+                                    ) : (
+                                        conversationGroups.map(({ group, items }) => (
+                                            <div key={group ?? 'all'} className="mb-3">
+                                                {group && (
+                                                    <div className="px-1 pb-1.5 text-[10px] uppercase tracking-wider font-semibold text-grey-dark">{group}</div>
+                                                )}
+                                                <div className="space-y-1">{items.map(renderConvRow)}</div>
                                             </div>
-                                        ))}
+                                        ))
+                                    )}
+                                </Tabs.Content>
+                                <Tabs.Content id="log" className="flex-1 min-h-0 overflow-y-auto px-6 py-12">
+                                    <div className="flex flex-col items-center text-center gap-3 text-grey-dark">
+                                        <EvaLogo size={28} />
+                                        <p className="text-sm m-0 max-w-[220px]">Ingen log endnu. Handlinger EVA udfører vises her.</p>
                                     </div>
-                                </div>
-                                <Drawer.Footer>
-                                    <Button
-                                        appearance="primary"
-                                        className="w-full !justify-center gap-1.5"
-                                        onClick={startNewConversation}
-                                    >
-                                        <Icon name="circle-plus" />
-                                        Ny samtale
-                                    </Button>
-                                </Drawer.Footer>
-                            </>
+                                </Tabs.Content>
+                                <Tabs.Content id="flows" className="flex-1 min-h-0 overflow-y-auto px-6 py-12">
+                                    <div className="flex flex-col items-center text-center gap-3 text-grey-dark">
+                                        <EvaLogo size={28} />
+                                        <p className="text-sm m-0 max-w-[220px]">Flows kommer snart.</p>
+                                    </div>
+                                </Tabs.Content>
+                            </Tabs>
                         ) : (
                           <>
-                        <div className="flex-1 min-h-0 overflow-y-auto px-4 py-3 space-y-4">
+                        <div className="flex-1 min-h-0 overflow-y-auto px-5 py-3 space-y-4">
                             {messages.map((m) => (
                                 <ChatMessage key={m.id} message={m} />
                             ))}
@@ -1068,11 +1423,14 @@ export default function App() {
                             )}
                             <div ref={conversationEndRef} />
                         </div>
-                        <Drawer.Footer>
+                        <Drawer.Footer className="!px-5 !border-t-0">
                             <div className="flex flex-col gap-2 w-full">
                                 {/* All-in-one input field (mirrors the "Eva — always available" EvaInputCard):
                                     context chip → textarea → bottom row with scrollable chips + inline send. */}
-                                <div className="rounded border border-grey-300 bg-white shadow-sm focus-within:border-grey-400">
+                                <div
+                                    className="rounded-xl"
+                                    style={{ background: 'linear-gradient(180deg, #F2F3F5 0%, #E8EAEE 100%)' }}
+                                >
                                     {contextRow && (
                                         <div className="px-3 pt-3 flex">
                                             <span
@@ -1131,13 +1489,16 @@ export default function App() {
                                                 ]}
                                             />
                                         </div>
-                                        <IconButton
-                                            icon="arrow-up"
+                                        <button
+                                            type="button"
                                             aria-label="Send"
-                                            appearance={evaInput.trim() && !thinking ? 'primary' : undefined}
-                                            disabled={!evaInput.trim() || thinking}
                                             onClick={sendTyped}
-                                        />
+                                            disabled={!evaInput.trim() || thinking}
+                                            className="inline-flex items-center justify-center w-8 h-8 rounded-lg text-white shrink-0 transition-opacity disabled:cursor-not-allowed"
+                                            style={{ backgroundColor: '#2F5DBD', opacity: !evaInput.trim() || thinking ? 0.5 : 1 }}
+                                        >
+                                            <Icon name="arrow-up" className="!h-4 !w-4" />
+                                        </button>
                                     </div>
                                 </div>
                                 <div className="text-center text-[11px] text-grey-dark">EVA er en AI assistent og kan lave fejl.</div>
@@ -1190,44 +1551,56 @@ function ChatMessage({ message }: { message: Message }) {
     const btn = 'eva-msg-action inline-flex items-center justify-center w-6 h-6 rounded hover:bg-grey-100 transition-colors';
 
     return (
-        <div className={'flex flex-col ' + (isUser ? 'items-end' : 'items-start')}>
+        <div className={'group flex flex-col ' + (isUser ? 'items-end' : 'items-start')}>
             <div
-                style={{ backgroundColor: isUser ? '#BEBEBE' : '#EEEEEE', color: '#1C1C1C' }}
-                className={'max-w-[80%] rounded-lg px-4 py-3 text-sm leading-5 ' + (isUser ? '' : 'space-y-3')}
+                style={isUser ? { backgroundColor: '#BEBEBE', color: '#1C1C1C' } : { color: '#1C1C1C' }}
+                className={
+                    isUser
+                        ? 'max-w-[80%] rounded-lg px-4 py-3 text-sm leading-5'
+                        : 'w-full text-sm leading-5 space-y-3'
+                }
             >
                 {message.parts.map((part, i) => (
                     <PartView key={i} part={part} />
                 ))}
             </div>
             {!isUser && (
-                <div className="mt-1 flex items-center gap-0.5 pl-1">
-                    <button
-                        type="button"
-                        aria-label="God besvarelse"
-                        aria-pressed={feedback === 'up'}
-                        onClick={() => setFeedback((f) => (f === 'up' ? null : 'up'))}
-                        className={btn}
-                    >
-                        <Icon name={feedback === 'up' ? 'thumb-up-solid' : 'thumb-up'} />
-                    </button>
-                    <button
-                        type="button"
-                        aria-label="Dårlig besvarelse"
-                        aria-pressed={feedback === 'down'}
-                        onClick={() => setFeedback((f) => (f === 'down' ? null : 'down'))}
-                        className={btn}
-                    >
-                        <Icon name={feedback === 'down' ? 'thumb-down-solid' : 'thumb-down'} />
-                    </button>
-                    <button
-                        type="button"
-                        aria-label={copied ? 'Kopieret' : 'Kopiér svar'}
-                        title={copied ? 'Kopieret' : 'Kopiér svar'}
-                        onClick={copyReply}
-                        className={btn}
-                    >
-                        <Icon name={copied ? 'tick' : 'copy'} />
-                    </button>
+                <div className="mt-1 min-h-6">
+                    {/* Feedback + copy + timestamp reveal on hover over the response (like a chat assistant). */}
+                    <div className="flex items-center gap-0.5 opacity-0 pointer-events-none transition-opacity group-hover:opacity-100 group-hover:pointer-events-auto focus-within:opacity-100 focus-within:pointer-events-auto">
+                        <button
+                            type="button"
+                            aria-label="God besvarelse"
+                            aria-pressed={feedback === 'up'}
+                            onClick={() => setFeedback((f) => (f === 'up' ? null : 'up'))}
+                            className={btn}
+                        >
+                            <Icon name={feedback === 'up' ? 'thumb-up-solid' : 'thumb-up'} />
+                        </button>
+                        <button
+                            type="button"
+                            aria-label="Dårlig besvarelse"
+                            aria-pressed={feedback === 'down'}
+                            onClick={() => setFeedback((f) => (f === 'down' ? null : 'down'))}
+                            className={btn}
+                        >
+                            <Icon name={feedback === 'down' ? 'thumb-down-solid' : 'thumb-down'} />
+                        </button>
+                        <button
+                            type="button"
+                            aria-label={copied ? 'Kopieret' : 'Kopiér svar'}
+                            title={copied ? 'Kopieret' : 'Kopiér svar'}
+                            onClick={copyReply}
+                            className={btn}
+                        >
+                            <Icon name={copied ? 'tick' : 'copy'} />
+                        </button>
+                        {message.createdAt != null && (
+                            <span className="ml-1.5 text-[11px] text-grey-400 select-none">
+                                {formatMessageTime(message.createdAt)}
+                            </span>
+                        )}
+                    </div>
                 </div>
             )}
         </div>
