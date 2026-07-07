@@ -755,6 +755,23 @@ export default function App() {
         const text = evaInput.trim();
         if (!text || thinking) return;
         setEvaInput('');
+        // Demo/mock mode (no Gemini key — e.g. the public keyless Pages build):
+        // give a friendly canned reply instead of erroring, and steer to the chips.
+        if (!GEMINI_KEY) {
+            respond(
+                { from: 'user', parts: [{ kind: 'text', text }] },
+                {
+                    from: 'eva',
+                    parts: [
+                        {
+                            kind: 'text',
+                            text: 'Tak for spørgsmålet! Dette er en demo af EVA uden adgang til rigtige data. Prøv et af forslagene ovenfor for at se, hvordan EVA svarer med tal, tabeller og handlinger.',
+                        },
+                    ],
+                }
+            );
+            return;
+        }
         // Flatten the conversation so far into Gemini turns, then add the new question.
         const history: GeminiTurn[] = (activeConversation?.messages ?? [])
             .map((m) => ({ role: (m.from === 'eva' ? 'model' : 'user') as 'user' | 'model', text: partsToText(m.parts) }))

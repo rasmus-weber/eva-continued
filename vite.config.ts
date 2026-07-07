@@ -4,7 +4,10 @@ import react from '@vitejs/plugin-react'
 // Dev-server proxies (ported from eva-advisor) so the chat can reach real services
 // same-origin — the browser calls http://localhost:5183/api/... and Vite forwards.
 // Keys live in .env (VITE_GEMINI_API_KEY, VITE_ECONOMIC_*) — never commit them.
-export default defineConfig({
+// `base` is '/eva-continued/' for production builds (GitHub Pages) only; dev stays '/'.
+// The public Pages build ships WITHOUT keys → the app runs in mock/demo mode.
+export default defineConfig(({ command }) => ({
+  base: command === 'build' ? '/eva-continued/' : '/',
   plugins: [react()],
   css: { transformer: 'postcss' },
   build: { cssMinify: false },
@@ -29,4 +32,4 @@ export default defineConfig({
       },
     },
   },
-})
+}))

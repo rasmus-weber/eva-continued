@@ -1,0 +1,50 @@
+name: Deploy eva-continued to GitHub Pages
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+# Allow GITHUB_TOKEN to deploy to Pages
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+# One concurrent deployment; cancel in-progress runs for new pushes
+concurrency:
+  group: pages
+  cancel-in-progress: true
+
+# NOTE: This build is intentionally KEYLESS — no VITE_GEMINI_API_KEY / VITE_ECONOMIC_*
+# are provided, so the published site runs in mock/demo mode (canned replies, no real
+# e-conomic data). Do NOT add those keys as Actions secrets: a public build would bake
+# them into the client bundle and expose them.
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: npm
+          cache-dependency-path: package-lock.json
+      # Use `npm install` (not `npm ci`): the inherited lockfile has minor drift
+      # that older npm versions reject under `ci`.
+      - run: npm install --no-audit --no-fund
+      - run: npm run build
+      - uses: actions/configure-pages@v5
+      - uses: actions/upload-pages-artifact@v3
+        with:
+          path: dist
+
+  deploy:
+    needs: build
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - id: deployment
+        uses: actions/deploy-pages@v4
